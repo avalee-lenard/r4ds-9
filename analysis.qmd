@@ -1,0 +1,99 @@
+---
+title: "Wildfires"
+author: "avalee lenard"
+format: html
+execute:
+  echo: false
+---
+
+```{r}
+#| cache: true
+#| message: false
+library(tidyverse)
+library(purrr)
+library(leaflet)
+library(jsonlite)
+
+raw <- fromJSON("data/wildfires.geojson")
+
+fires <- tibble(features = raw$features) |>
+  unnest_wider(features) |>
+  unnest_wider(properties) |>
+  unnest_wider(geometry, names_sep = "_") |>
+  select(
+    incident,
+    gis_acres,
+    fire_year,
+    agency,
+    state,
+    geometry_coordinates
+  ) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+```
+
+```{r}
+big_fires <- fires |>
+  dplyr::filter(gis_acres >= 100000) |>
+  dplyr::mutate(
+    lon = purrr::map_dbl(
+      geometry_coordinates,
+      \(rings) mean(unlist(purrr::map(rings, \(ring) ring[, , 1])))
+    ),
+    lat = purrr::map_dbl(
+      geometry_coordinates,
+      \(rings) mean(unlist(purrr::map(rings, \(ring) ring[, , 2])))
+    )
+  )
+```
+
+```{r}
+top_fires <- big_fires |>
+  dplyr::slice_max(gis_acres, n = 10, with_ties = FALSE)
+
+top_geometries <- purrr::map(
+  top_fires$geometry_coordinates,
+  \(rings) sf::st_polygon(
+    purrr::map(rings, \(ring) cbind(ring[1, , 1], ring[1, , 2]))
+  )
+) |>
+  sf::st_sfc(crs = 4326)
+
+top_fires <- sf::st_sf(top_fires, geometry = top_geometries)
+map_bounds <- sf::st_bbox(top_fires)
+
+leaflet::leaflet(top_fires) |>
+  leaflet::addTiles() |>
+  leaflet::addPolygons(
+    popup = ~paste0(
+      "<strong>", incident, "</strong><br>",
+      "Year: ", fire_year, "<br>",
+      "Acres: ", format(round(gis_acres), big.mark = ",")
+    )
+  ) |>
+  leaflet::fitBounds(
+    lng1 = map_bounds["xmin"],
+    lat1 = map_bounds["ymin"],
+    lng2 = map_bounds["xmax"],
+    lat2 = map_bounds["ymax"]
+  )
+```
+
+```{r}
+fires |>
+  dplyr::group_by(fire_year) |>
+  dplyr::summarise(
+    total_acres = sum(gis_acres, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  ggplot2::ggplot(ggplot2::aes(x = fire_year, y = total_acres)) +
+  ggplot2::geom_line() +
+  ggplot2::labs(
+    title = "Total Wildfire Acres Burned by Year",
+    x = "Fire year",
+    y = "Total acres burned",
+    caption = "Source: wildfires.geojson"
+  )
+```
